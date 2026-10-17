@@ -1,0 +1,23 @@
+# Local secrets and configuration
+.env
+.env.*
+!.env.example
+
+# Python environments and generated files
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local data and scratch work
+*.db
+*.db-shm
+*.db-wal
+work/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

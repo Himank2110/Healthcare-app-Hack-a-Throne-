@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>My Health — Patient Portal</title>
+  <style>
+    :root { color-scheme: light; --ink:#172a3a; --muted:#617487; --line:#dce6eb; --teal:#087f8c; --pale:#eff8f8; }
+    * { box-sizing:border-box }
+    body { margin:0; background:#f4f7f8; color:var(--ink); font:16px/1.5 system-ui, sans-serif }
+    header { background:white; border-bottom:1px solid var(--line); padding:18px max(20px, calc((100% - 980px)/2)); display:flex; align-items:center; justify-content:space-between }
+    header strong { font-size:20px }
+    main { max-width:980px; margin:28px auto; padding:0 18px }
+    .card { background:white; border:1px solid var(--line); border-radius:14px; padding:22px; margin-bottom:18px; box-shadow:0 3px 14px #17324b0a }
+    h1 { font-size:28px; margin:0 0 6px } h2 { font-size:20px; margin:0 0 12px }
+    p { margin:6px 0; color:var(--muted) }
+    input,button { font:inherit; border-radius:9px; padding:10px 13px }
+    input { border:1px solid #bacbd3; width:100%; max-width:420px }
+    button { border:0; background:var(--teal); color:white; font-weight:650; cursor:pointer }
+    button.secondary { background:white; color:var(--teal); border:1px solid var(--teal) }
+    button.danger { background:#a33a43 } button:disabled { opacity:.42; cursor:not-allowed }
+    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center }
+    .tabs { display:flex; gap:8px; margin:18px 0 }
+    .tab { background:transparent; border:1px solid var(--line); color:var(--ink) }
+    .tab.selected { background:var(--pale); color:var(--teal); border-color:var(--teal) }
+    .item { display:flex; justify-content:space-between; gap:18px; align-items:center; padding:16px 0; border-top:1px solid var(--line) }
+    .item:first-child { border-top:0 }
+    .item-title { font-weight:700 } .small { font-size:14px }
+    .hidden { display:none !important }
+    #share-panel { text-align:center; border:1px solid #b7dedf; background:var(--pale); border-radius:12px; padding:18px; margin-top:16px }
+    #qr-image { display:block; width:230px; height:230px; margin:14px auto; background:white; padding:8px; border-radius:8px }
+    .notice { padding:12px; border-radius:9px; background:#fff7df; color:#604b11; margin-top:12px }
+    .error { color:#a33a43 } .success { color:#08734b }
+    @media(max-width:620px) { .item { align-items:flex-start; flex-direction:column } header { padding:14px 18px } }
+  </style>
+</head>
+<body>
+  <header><strong>My Health</strong><span class="small" id="patient-name">Patient portal</span></header>
+  <main>
+    <section class="card" id="login-card">
+      <h1>Welcome</h1>
+      <p>For this local demo, create a patient sign-in token. This demo sign-in is for development only.</p>
+      <p><a href="/register">Create a patient account with email and password</a></p>
+      <div class="row" style="margin-top:14px">
+        <input id="display-name" value="demo-patient" aria-label="Patient display name">
+        <button id="login-button">Sign in to demo</button>
+      </div>
+      <p id="login-message" class="small"></p>
+    </section>
+
+    <section class="hidden" id="portal">
+      <div class="card">
+        <h1>Your health records</h1>
+        <p>Choose a prescription to share with a pharmacy. Your encounter history is available in the Encounters tab.</p>
+        <div class="tabs" role="tablist">
+          <button class="tab selected" data-tab="prescriptions">Prescriptions</button>
+          <button class="tab" data-tab="encounters">Encounters</button>
+        </div>
+        <div id="prescriptions-list"></div>
+        <div id="encounters-list" class="hidden"></div>
+        <p id="records-message" class="small"></p>
+      </div>
+      <div class="card hidden" id="share-card">
+        <h2>Share prescription <span id="selected-prescription"></span></h2>
+        <p>Choose how to share. The code expires in five minutes and can be used once by a pharmacist.</p>
+        <div class="row" style="margin-top:14px;justify-content:center">
+          <button id="qr-button">Show QR code</button>
+          <button id="nfc-button" class="secondary" disabled title="This browser or device does not report Web NFC support">Share by NFC</button>
+        </div>
+        <p id="nfc-help" class="small"></p>
+        <div id="share-panel" class="hidden">
+          <h2 id="share-title">Show this QR code to the pharmacy</h2>
+          <img id="qr-image" alt="One-time prescription sharing QR code">
+          <p id="share-status" class="success"></p>
+          <button id="cancel-share" class="danger">Cancel sharing</button>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const api = '/api/v1';
+    let token = sessionStorage.getItem('patientToken') || '';
+    let selectedPrescription = null;
+    let activeShare = null;
+    const $ = (id) => document.getElementById(id);
+
+    function authHeaders(json = false) {
+      const headers = { Authorization: `Bearer ${token}` };
+      if (json) headers['Content-Type'] = 'application/json';
+      return headers;
+    }
+    async function request(path, options = {}) {
+      const response = await fetch(api + path, { ...options, headers: { ...authHeaders(Boolean(options.body)), ...options.headers } });
+      const data = response.status === 204 ? null : await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.detail || `Request failed (${response.status})`);
+      return data;
+    }
+    function date(value) { return new Date(value).toLocaleString(); }
+    function text(parent, tag, value, className = '') {
+      const node = document.createElement(tag); node.textContent = value; if (className) node.className = className; parent.append(node); return node;
+    }
+    function setMessage(message, isError = false) { $('records-message').textContent = message; $('records-message').className = `small ${isError ? 'error' : ''}`; }
+
+    async function loadRecords() {
+      $('prescriptions-list').replaceChildren(); $('encounters-list').replaceChildren();
+      setMessage('Loading your records…');
+      try {
+        const [prescriptions, encounters] = await Promise.all([request('/prescriptions/mine'), request('/encounters/mine')]);
+        if (!prescriptions.length) text($('prescriptions-list'), 'p', 'No prescriptions yet.');
+        prescriptions.forEach((prescription) => {
+          const row = document.createElement('div'); row.className = 'item';
+          const info = document.createElement('div');
+          text(info, 'div', `Prescription #${prescription.id}`, 'item-title');
+          text(info, 'div', `Encounter #${prescription.encounter_id} · ${prescription.status} · ${date(prescription.created_at)}`, 'small');
+          prescription.items.forEach((item) => text(info, 'div', `${item.medicine} — ${item.instructions}`, 'small'));
+          const share = document.createElement('button'); share.textContent = 'Share with pharmacy';
+          share.disabled = prescription.status !== 'active';
+          share.addEventListener('click', () => choosePrescription(prescription));
+          row.append(info, share); $('prescriptions-list').append(row);
+        });
+        if (!encounters.length) text($('encounters-list'), 'p', 'No encounters yet.');
+        encounters.forEach((encounter) => {
+          const row = document.createElement('div'); row.className = 'item';
+          const info = document.createElement('div');
+          text(info, 'div', `Encounter #${encounter.id}`, 'item-title');
+          text(info, 'div', encounter.diagnosis);
+          text(info, 'div', date(encounter.created_at), 'small');
+          row.append(info); $('encounters-list').append(row);
+        });
+        setMessage('');
+      } catch (error) { setMessage(error.message, true); }
+    }
+    function choosePrescription(prescription) {
+      selectedPrescription = prescription;
+      $('selected-prescription').textContent = `#${prescription.id}`;
+      $('share-card').classList.remove('hidden'); $('share-panel').classList.add('hidden');
+      $('share-card').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+    async function beginShare(method) {
+      if (!selectedPrescription) return;
+      $('qr-button').disabled = true; $('nfc-button').disabled = true;
+      try {
+        if (activeShare) {
+          try { await request(`/prescription-shares/${activeShare.shareId}/revoke`, { method: 'POST' }); } catch {}
+          activeShare = null;
+          sessionStorage.removeItem('activeShare');
+        }
+        const share = await request(`/prescriptions/${selectedPrescription.id}/share`, { method: 'POST' });
+        activeShare = { shareId: share.share_id, expiresAt: share.expires_at, prescriptionId: selectedPrescription.id };
+        sessionStorage.setItem('activeShare', JSON.stringify(activeShare));
+        $('share-panel').classList.remove('hidden');
+        $('cancel-share').classList.remove('hidden');
+        $('qr-image').src = share.qr_code_data_uri;
+        $('qr-image').classList.toggle('hidden', method === 'nfc');
+        $('share-title').textContent = method === 'nfc' ? 'Hold your device near the pharmacy reader' : 'Show this QR code to the pharmacy';
+        $('share-status').textContent = `This one-time share expires at ${date(share.expires_at)}.`;
+        if (method === 'nfc') {
+          await new NDEFReader().write({ records: [{ recordType: 'text', data: share.share_token }] });
+          $('share-status').textContent = `NFC share started. It expires at ${date(share.expires_at)}. Tap cancel when you are done.`;
+        }
+      } catch (error) {
+        if (activeShare) { try { await request(`/prescription-shares/${activeShare.shareId}/revoke`, { method: 'POST' }); } catch {} }
+        activeShare = null; sessionStorage.removeItem('activeShare');
+        $('share-panel').classList.add('hidden');
+        alert(`Could not start sharing: ${error.message}`);
+      } finally { $('qr-button').disabled = false; $('nfc-button').disabled = !('NDEFReader' in window) || !window.isSecureContext; }
+    }
+    async function cancelShare() {
+      if (!activeShare) return;
+      $('cancel-share').disabled = true;
+      try {
+        await request(`/prescription-shares/${activeShare.shareId}/revoke`, { method: 'POST' });
+        $('share-status').textContent = 'Sharing cancelled. This code can no longer be used.';
+        $('share-status').className = 'success';
+        $('qr-image').classList.add('hidden'); $('cancel-share').classList.add('hidden');
+        sessionStorage.removeItem('activeShare'); activeShare = null;
+      } catch (error) {
+        $('share-status').textContent = error.message; $('share-status').className = 'error';
+      } finally { $('cancel-share').disabled = false; }
+    }
+
+    $('login-button').addEventListener('click', async () => {
+      $('login-message').textContent = 'Signing in…';
+      try {
+        const response = await fetch(`${api}/auth/dev-token`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({role:'patient', display_name:$('display-name').value || 'demo-patient'}) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.detail || 'Sign-in failed');
+        token = data.access_token; sessionStorage.setItem('patientToken', token);
+        $('login-card').classList.add('hidden'); $('portal').classList.remove('hidden');
+        $('patient-name').textContent = $('display-name').value || 'Patient';
+        await loadRecords();
+      } catch (error) { $('login-message').textContent = error.message; $('login-message').className = 'small error'; }
+    });
+    document.querySelectorAll('.tab').forEach((button) => button.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach((tab) => tab.classList.toggle('selected', tab === button));
+      $('prescriptions-list').classList.toggle('hidden', button.dataset.tab !== 'prescriptions');
+      $('encounters-list').classList.toggle('hidden', button.dataset.tab !== 'encounters');
+    }));
+    $('qr-button').addEventListener('click', () => beginShare('qr'));
+    $('nfc-button').addEventListener('click', () => beginShare('nfc'));
+    $('cancel-share').addEventListener('click', cancelShare);
+
+    const nfcAvailable = 'NDEFReader' in window && window.isSecureContext;
+    $('nfc-button').disabled = !nfcAvailable;
+    $('nfc-help').textContent = nfcAvailable ? 'This browser reports Web NFC support. NFC writing also requires device and browser permission.' : 'NFC is disabled because this browser/device does not report Web NFC support. QR sharing remains available.';
+    if (token) {
+      $('login-card').classList.add('hidden'); $('portal').classList.remove('hidden');
+      $('patient-name').textContent = sessionStorage.getItem('registeredPatientName') || 'Patient'; loadRecords();
+      try { activeShare = JSON.parse(sessionStorage.getItem('activeShare') || 'null'); } catch { activeShare = null; }
+      if (activeShare) {
+        $('selected-prescription').textContent = `#${activeShare.prescriptionId}`;
+        $('share-card').classList.remove('hidden'); $('share-panel').classList.remove('hidden');
+        $('qr-image').classList.add('hidden');
+        $('share-title').textContent = 'Share is active on this page session';
+        $('share-status').textContent = 'The QR/NFC payload is not saved. You can still cancel this share here.';
+      }
+    }
+  </script>
+</body>
+</html>

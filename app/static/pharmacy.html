@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pharmacy — Prescription Reader</title>
+  <style>
+    :root { color-scheme:light; --ink:#172a3a; --muted:#617487; --line:#dce6eb; --teal:#087f8c; --pale:#eff8f8 }
+    * { box-sizing:border-box }
+    body { margin:0; background:#f4f7f8; color:var(--ink); font:16px/1.5 system-ui,sans-serif }
+    header { background:white; border-bottom:1px solid var(--line); padding:18px max(20px,calc((100% - 900px)/2)); display:flex; justify-content:space-between; align-items:center }
+    header strong { font-size:20px }
+    main { max-width:900px; margin:28px auto; padding:0 18px }
+    .card { background:white; border:1px solid var(--line); border-radius:14px; padding:22px; margin-bottom:18px; box-shadow:0 3px 14px #17324b0a }
+    h1 { font-size:28px; margin:0 0 6px } h2 { font-size:20px; margin:0 0 12px }
+    p { color:var(--muted); margin:6px 0 }
+    input,button { font:inherit; border-radius:9px; padding:10px 13px }
+    input { border:1px solid #bacbd3; width:100%; max-width:420px }
+    button { border:0; background:var(--teal); color:white; font-weight:650; cursor:pointer }
+    button.secondary { background:white; color:var(--teal); border:1px solid var(--teal) }
+    button:disabled { opacity:.45; cursor:not-allowed }
+    .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:14px }
+    .hidden { display:none !important }
+    .small { font-size:14px }
+    .error { color:#a33a43 } .success { color:#08734b }
+    #camera { width:min(100%,560px); max-height:420px; object-fit:cover; background:#15232d; border-radius:12px; margin-top:16px }
+    .notice { padding:12px; border-radius:9px; background:#fff7df; color:#604b11; margin-top:12px }
+    .medicine { padding:12px 0; border-top:1px solid var(--line) }
+    .medicine:first-child { border-top:0 }
+    @media(max-width:620px) { header { padding:14px 18px } }
+  </style>
+</head>
+<body>
+  <header><strong>Pharmacy prescription reader</strong><span id="status-label" class="small">Not signed in</span></header>
+  <main>
+    <section class="card" id="login-card">
+      <h1>Pharmacy sign-in</h1>
+      <p>Local demo only. Sign in as a pharmacist to scan and redeem a patient’s one-time share.</p>
+      <p><a href="/register">Register a pharmacy account</a></p>
+      <div class="row">
+        <input id="display-name" value="demo-pharmacist" aria-label="Pharmacist display name">
+        <button id="login-button">Sign in to demo</button>
+      </div>
+      <p id="login-message" class="small"></p>
+    </section>
+
+    <section class="card hidden" id="reader-card">
+      <h1>Read patient share</h1>
+      <p>Scan the patient’s QR code or read their NFC share. Redeeming a code uses it once.</p>
+      <div class="row">
+        <button id="camera-button">Start camera scanner</button>
+        <button id="stop-camera-button" class="secondary hidden">Stop camera</button>
+        <button id="nfc-button" class="secondary">Start NFC reader</button>
+        <button id="stop-nfc-button" class="secondary hidden">Stop NFC reader</button>
+      </div>
+      <p id="capability-message" class="small"></p>
+      <video id="camera" class="hidden" playsinline muted></video>
+      <p id="reader-message" class="small" aria-live="polite"></p>
+      <details style="margin-top:18px">
+        <summary>Enter a share token manually</summary>
+        <p class="small">Use this if the device camera or NFC reader is unavailable.</p>
+        <div class="row"><input id="manual-token" autocomplete="off" aria-label="Share token"><button id="redeem-button">Redeem token</button></div>
+      </details>
+    </section>
+
+    <section class="card hidden" id="prescription-card">
+      <h2>Prescription received</h2>
+      <div id="prescription-details"></div>
+    </section>
+  </main>
+  <script src="/static/js/jsQR.js"></script>
+  <script>
+    const api = '/api/v1';
+    let token = sessionStorage.getItem('pharmacistToken') || '';
+    let videoStream = null;
+    let scanFrame = null;
+    let scanBusy = false;
+    let nfcReader = null;
+    let nfcAbort = null;
+    const $ = (id) => document.getElementById(id);
+    const nfcAvailable = 'NDEFReader' in window && window.isSecureContext;
+    const cameraAvailable = ('BarcodeDetector' in window || typeof window.jsQR === 'function') && !!navigator.mediaDevices?.getUserMedia;
+
+    function authHeaders() { return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }; }
+    async function apiRequest(path, options = {}) {
+      const response = await fetch(api + path, { ...options, headers: { ...authHeaders(), ...options.headers } });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(data?.detail || `Request failed (${response.status})`);
+      return data;
+    }
+    function message(value, isError = false) {
+      $('reader-message').textContent = value;
+      $('reader-message').className = `small ${isError ? 'error' : ''}`;
+    }
+    function addText(parent, tag, value, className = '') {
+      const element = document.createElement(tag); element.textContent = value;
+      if (className) element.className = className;
+      parent.append(element); return element;
+    }
+    function stopCamera() {
+      if (scanFrame !== null) cancelAnimationFrame(scanFrame);
+      scanFrame = null; scanBusy = false;
+      if (videoStream) videoStream.getTracks().forEach((track) => track.stop());
+      videoStream = null; $('camera').srcObject = null; $('camera').classList.add('hidden');
+      $('camera-button').classList.remove('hidden'); $('stop-camera-button').classList.add('hidden');
+    }
+    async function stopNfc() {
+      if (nfcAbort) nfcAbort.abort();
+      nfcAbort = null; nfcReader = null;
+      $('nfc-button').classList.remove('hidden'); $('stop-nfc-button').classList.add('hidden');
+    }
+    async function redeem(rawToken) {
+      if (!rawToken || scanBusy) return;
+      scanBusy = true; stopCamera(); await stopNfc();
+      message('Redeeming one-time share…');
+      $('prescription-card').classList.add('hidden');
+      try {
+        const prescription = await apiRequest('/prescription-shares/redeem', {
+          method:'POST', body:JSON.stringify({ share_token:rawToken.trim() })
+        });
+        showPrescription(prescription);
+        message('Share redeemed successfully. This code cannot be used again.');
+      } catch (error) { message(error.message, true); }
+      finally { scanBusy = false; }
+    }
+    function showPrescription(prescription) {
+      const details = $('prescription-details'); details.replaceChildren();
+      addText(details,'p',`Prescription #${prescription.id} · Encounter #${prescription.encounter_id}`,'small');
+      addText(details,'p',`Status: ${prescription.status} · Created: ${new Date(prescription.created_at).toLocaleString()}`,'small');
+      prescription.items.forEach((item) => {
+        const row = document.createElement('div'); row.className='medicine';
+        addText(row,'strong',item.medicine); addText(row,'div',item.instructions,'small'); details.append(row);
+      });
+      $('prescription-card').classList.remove('hidden');
+    }
+    async function startCamera() {
+      if (!cameraAvailable) { message('QR camera scanning is not supported in this browser. Try NFC or enter the token manually.', true); return; }
+      try {
+        const detector = 'BarcodeDetector' in window ? new BarcodeDetector({ formats:['qr_code'] }) : null;
+        videoStream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ ideal:'environment' } }, audio:false });
+        $('camera').srcObject = videoStream; $('camera').classList.remove('hidden');
+        $('camera-button').classList.add('hidden'); $('stop-camera-button').classList.remove('hidden');
+        await $('camera').play(); message('Camera is on. Point it at the patient’s QR code.');
+        const canvas = document.createElement('canvas');
+        const canvasContext = canvas.getContext('2d', { willReadFrequently:true });
+        const scan = async () => {
+          if (!videoStream) return;
+          try {
+            let decodedText = '';
+            if (detector) {
+              const codes = await detector.detect($('camera'));
+              decodedText = codes[0]?.rawValue || '';
+            } else {
+              const video = $('camera');
+              if (video.videoWidth && video.videoHeight) {
+                const scale = Math.min(1, 800 / video.videoWidth);
+                canvas.width = Math.round(video.videoWidth * scale);
+                canvas.height = Math.round(video.videoHeight * scale);
+                canvasContext.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const frame = canvasContext.getImageData(0, 0, canvas.width, canvas.height);
+                decodedText = window.jsQR(frame.data, frame.width, frame.height, { inversionAttempts:'dontInvert' })?.data || '';
+              }
+            }
+            if (decodedText) { await redeem(decodedText); return; }
+          } catch {}
+          scanFrame = requestAnimationFrame(scan);
+        };
+        scanFrame = requestAnimationFrame(scan);
+      } catch (error) { stopCamera(); message(`Could not start camera: ${error.message}`, true); }
+    }
+    async function startNfc() {
+      if (!nfcAvailable) { message('NFC reading is not supported by this browser or device.', true); return; }
+      try {
+        nfcReader = new NDEFReader(); nfcAbort = new AbortController();
+        nfcReader.addEventListener('reading', async (event) => {
+          for (const record of event.message.records) {
+            if (record.recordType !== 'text' || !record.data) continue;
+            const bytes = new Uint8Array(record.data.buffer, record.data.byteOffset, record.data.byteLength);
+            if (!bytes.length) continue;
+            const languageLength = bytes[0] & 0x3f;
+            const rawToken = new TextDecoder().decode(bytes.slice(1 + languageLength));
+            await redeem(rawToken); return;
+          }
+          message('NFC tag read, but it did not contain a supported prescription share.', true);
+        }, { signal:nfcAbort.signal });
+        await nfcReader.scan({ signal:nfcAbort.signal });
+        $('nfc-button').classList.add('hidden'); $('stop-nfc-button').classList.remove('hidden');
+        message('NFC reader is on. Hold the patient’s device or NFC tag near this device.');
+      } catch (error) { await stopNfc(); message(`Could not start NFC reader: ${error.message}`, true); }
+    }
+
+    $('login-button').addEventListener('click', async () => {
+      $('login-message').textContent = 'Signing in…';
+      try {
+        const response = await fetch(`${api}/auth/dev-token`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({role:'pharmacist', display_name:$('display-name').value || 'demo-pharmacist'}) });
+        const data = await response.json(); if (!response.ok) throw new Error(data.detail || 'Sign-in failed');
+        token = data.access_token; sessionStorage.setItem('pharmacistToken',token); enterPortal();
+      } catch (error) { $('login-message').textContent = error.message; $('login-message').className='small error'; }
+    });
+    function enterPortal() {
+      $('login-card').classList.add('hidden'); $('reader-card').classList.remove('hidden');
+      $('status-label').textContent='Signed in as pharmacist';
+    }
+    $('camera-button').addEventListener('click',startCamera);
+    $('stop-camera-button').addEventListener('click',() => { stopCamera(); message('Camera stopped.'); });
+    $('nfc-button').addEventListener('click',startNfc);
+    $('stop-nfc-button').addEventListener('click',async () => { await stopNfc(); message('NFC reader stopped.'); });
+    $('redeem-button').addEventListener('click',() => redeem($('manual-token').value));
+    $('manual-token').addEventListener('keydown',(event) => { if(event.key==='Enter') redeem($('manual-token').value); });
+    $('capability-message').textContent = `${cameraAvailable ? 'Camera QR scanning is available.' : 'Camera QR scanning is not available in this browser; use NFC or manual entry.'} ${nfcAvailable ? 'NFC reading is available.' : 'NFC is unavailable on this browser or device.'}`;
+    $('camera-button').disabled = !cameraAvailable; $('nfc-button').disabled = !nfcAvailable;
+    if (token) enterPortal();
+  </script>
+</body>
+</html>

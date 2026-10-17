@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Create an account — My Health</title>
+  <style>
+    :root { color-scheme:light; --ink:#172a3a; --muted:#617487; --line:#dce6eb; --teal:#087f8c; --pale:#eff8f8 }
+    * { box-sizing:border-box }
+    body { margin:0; background:#f4f7f8; color:var(--ink); font:16px/1.5 system-ui,sans-serif }
+    header { background:white; border-bottom:1px solid var(--line); padding:18px max(20px,calc((100% - 760px)/2)) }
+    main { max-width:760px; margin:30px auto; padding:0 18px }
+    .card { background:white; border:1px solid var(--line); border-radius:14px; padding:24px; box-shadow:0 3px 14px #17324b0a }
+    h1 { margin:0 0 6px; font-size:28px } p { color:var(--muted); margin:6px 0 18px }
+    form { display:grid; grid-template-columns:1fr 1fr; gap:16px }
+    label { display:grid; gap:6px; font-weight:600 }
+    input,select,button { font:inherit; border-radius:9px; padding:10px 12px }
+    input,select { width:100%; border:1px solid #bacbd3; background:white; color:var(--ink) }
+    button { border:0; background:var(--teal); color:white; font-weight:650; cursor:pointer }
+    .full { grid-column:1/-1 }
+    .notice { margin-top:18px; padding:12px; background:var(--pale); border-radius:9px }
+    #message { margin-top:16px; white-space:pre-line }
+    .error { color:#a33a43 } .success { color:#08734b }
+    a { color:var(--teal) }
+    @media(max-width:600px) { form { grid-template-columns:1fr } .full { grid-column:auto } }
+  </style>
+</head>
+<body>
+  <header><strong>My Health · Account registration</strong></header>
+  <main>
+    <section class="card">
+      <h1>Create your account</h1>
+      <p>Use your own username, email, and password. Professional accounts need admin approval before they can sign in.</p>
+      <form id="registration-form">
+        <label>Display name<input name="display_name" required maxlength="120" autocomplete="name"></label>
+        <label>Username<input name="username" required minlength="3" maxlength="64" pattern="[A-Za-z0-9_.-]+" autocomplete="username" aria-describedby="username-help"><small id="username-help">3–64 letters, numbers, dots, dashes, or underscores.</small></label>
+        <label>Email<input name="email" type="email" required maxlength="320" autocomplete="email"></label>
+        <label>Password<input name="password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"><small>At least 12 characters.</small></label>
+        <label class="full">I am registering as
+          <select name="role" id="role">
+            <option value="patient">Patient</option>
+            <option value="clinician">Clinician / doctor</option>
+            <option value="pharmacist">Pharmacist</option>
+          </select>
+        </label>
+        <label id="organization-type-field" class="full hidden">Workplace type
+          <select name="organization_type" id="organization-type"></select>
+        </label>
+        <label id="organization-name-field" class="full hidden">Clinic, hospital, or pharmacy name
+          <input name="organization_name" id="organization-name" maxlength="160">
+        </label>
+        <button id="submit-button" class="full" type="submit">Create account</button>
+      </form>
+      <div id="message" role="status" aria-live="polite"></div>
+      <div class="notice">Patient accounts are activated right away. Clinician and pharmacist details are sent to an administrator for review. This demo collects workplace names but does not independently verify licenses.</div>
+      <p style="margin-top:18px"><a href="/patient">Go to the patient portal</a></p>
+    </section>
+  </main>
+  <script>
+    const form = document.getElementById('registration-form');
+    const roleField = document.getElementById('role');
+    const typeField = document.getElementById('organization-type');
+    const nameField = document.getElementById('organization-name');
+    const message = document.getElementById('message');
+    function updateRoleFields() {
+      const role = roleField.value;
+      const professional = role !== 'patient';
+      document.getElementById('organization-type-field').classList.toggle('hidden', !professional);
+      document.getElementById('organization-name-field').classList.toggle('hidden', !professional);
+      nameField.required = professional;
+      typeField.replaceChildren();
+      const choices = role === 'clinician' ? [['clinic','Clinic'],['hospital','Hospital']] : role === 'pharmacist' ? [['pharmacy','Pharmacy']] : [];
+      choices.forEach(([value,label]) => typeField.add(new Option(label,value)));
+    }
+    roleField.addEventListener('change', updateRoleFields);
+    updateRoleFields();
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const values = Object.fromEntries(new FormData(form));
+      if (values.role === 'patient') { delete values.organization_type; delete values.organization_name; }
+      message.className = '';
+      message.textContent = 'Creating account…';
+      document.getElementById('submit-button').disabled = true;
+      try {
+        const response = await fetch('/api/v1/auth/register', {
+          method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(values)
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Please check the information and try again.');
+        if (data.role === 'patient' && data.access_token) {
+          sessionStorage.setItem('patientToken', data.access_token);
+          sessionStorage.setItem('registeredPatientName', data.display_name);
+          message.className = 'success';
+          message.innerHTML = 'Patient account created. <a href="/patient">Open your patient portal</a>.';
+          form.reset(); updateRoleFields();
+        } else {
+          message.className = 'success';
+          message.textContent = `${data.message} Your application is pending review.`;
+          form.reset(); updateRoleFields();
+        }
+      } catch (error) {
+        message.className = 'error'; message.textContent = error.message;
+      } finally { document.getElementById('submit-button').disabled = false; }
+    });
+  </script>
+</body>
+</html>
