@@ -1,4 +1,8 @@
-# Healthcare Records API starter
+# Healthcare-app-Hack-a-Throne-
+
+Backend code (built with Codex's help) for a healthcare app that makes creating and managing prescriptions easier than pen and paper.
+
+## Healthcare Records API starter
 
 A small FastAPI backend scaffold for the prescription workflow described in the supplied presentation.
 
